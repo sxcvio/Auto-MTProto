@@ -1,15 +1,12 @@
 #!/bin/bash
 # =============================================================================
 #  MTProxy Installer — Telegram MTProto Proxy
-#  Автоматическая установка и настройка прокси-сервера для Telegram
-#  https://github.com/TelegramMessenger/MTProxy
-#
-#  Автор: SXCVIO
+#  https://github.com/sxcvio/Auto-MTProto
+#  Autor: SXCVIO
 # =============================================================================
 
-set -e
+set -euo pipefail
 
-# ─── Цвета ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -17,414 +14,462 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# ─── Баннер ──────────────────────────────────────────────────────────────────
+INSTALL_DIR="/opt/mtproxy"
+PORT=443
+SECRET=""
+PUBLIC_IP=""
+MAX_USERS=0
+WORKERS=1
+BOTTLENECK="CPU"
+
+# ---- output helpers ---------------------------------------------------------
+info()    { echo -e "  ${BLUE}i${NC}  $1"; }
+success() { echo -e "  ${GREEN}+${NC}  $1"; }
+warn()    { echo -e "  ${YELLOW}!${NC}  $1"; }
+error()   { echo -e "  ${RED}x${NC}  $1"; exit 1; }
+step()    { echo -e "\n  ${CYAN}${BOLD}>> $1${NC}"; }
+
+# ---- table (ASCII, no Unicode, no ANSI inside printf) -----------------------
+# Box width: label 16 + value 26 + 4 spaces = 46 inner chars
+# Full line:  "  |" + 46 + "|"  = 51 visible chars, always the same
+
+_TW=46
+
+trow() {
+    local lbl="$1" val="$2"
+    local vmax=$(( _TW - 18 ))
+    (( ${#val} > vmax )) && val="${val:0:$(( vmax - 1 ))}~"
+    # All printf here is pure ASCII — no ANSI escapes inside the format string
+    local body
+    body=$(printf "  %-16s%-28s" "$lbl" "$val")
+    echo -e "  ${BOLD}|${NC}${body}  ${BOLD}|${NC}"
+}
+
+thead() {
+    local txt="$1"
+    local inner=$(( _TW ))
+    local total_pad=$(( inner - ${#txt} ))
+    local lp=$(( total_pad / 2 ))
+    local rp=$(( total_pad - lp ))
+    local body
+    body=$(printf "%${lp}s%s%${rp}s" "" "$txt" "")
+    echo -e "  ${BOLD}|${NC}${body}  ${BOLD}|${NC}"
+}
+
+_hline() {
+    local c="$1" l="$2" r="$3"
+    local bar
+    bar=$(printf '%0.s-' $(seq 1 $(( _TW + 2 ))))
+    echo -e "  ${BOLD}${l}${bar}${r}${NC}"
+}
+
+ttop() { _hline - '+' '+'; }
+tsep() { _hline - '+' '+'; }
+tbot() { _hline - '+' '+'; }
+
+# ---- banner -----------------------------------------------------------------
 print_banner() {
     echo ""
     echo -e "${CYAN}${BOLD}"
-    echo "  ╔╦╗╔╦╗╔═╗  ╔═╗┬─┐┌─┐─┐ ┬┬ ┬"
-    echo "  ║║║ ║ ╠═╝  ╠═╝├┬┘│ │┌┴┬┘└┬┘"
-    echo "  ╩ ╩ ╩ ╩    ╩  ┴└─└─┘┴ └─ ┴ "
+    echo "  +-+-+-+  +-+-+-+-+-+"
+    echo "  |M|T|P|  |P|r|o|x|y|"
+    echo "  +-+-+-+  +-+-+-+-+-+"
     echo -e "${NC}"
-    echo -e "${DIM}  Telegram MTProxy — Автоматическая установка${NC}"
-    echo -e "${DIM}  ──────────────────────────────────────────${NC}"
-    echo -e "${DIM}  Автор: ${NC}${BOLD}SXCVIO${NC}"
+    echo -e "  ${DIM}Telegram MTProxy -- Avtomaticheskaya ustanovka${NC}"
+    echo -e "  ${DIM}----------------------------------------------${NC}"
+    echo -e "  ${DIM}Avtor: ${NC}${BOLD}SXCVIO${NC}"
     echo ""
 }
 
-# ─── Утилиты вывода ──────────────────────────────────────────────────────────
-info()    { echo -e "  ${BLUE}ℹ${NC}  $1"; }
-success() { echo -e "  ${GREEN}✔${NC}  $1"; }
-warn()    { echo -e "  ${YELLOW}⚠${NC}  $1"; }
-error()   { echo -e "  ${RED}✖${NC}  $1"; exit 1; }
-step()    { echo -e "\n  ${CYAN}${BOLD}▶ $1${NC}"; }
-
-# ─── Проверка root ───────────────────────────────────────────────────────────
+# ---- root check -------------------------------------------------------------
 check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        error "Скрипт нужно запускать от root: sudo bash $0"
-    fi
+    [[ $EUID -eq 0 ]] || error "Zapustite ot root: sudo bash $0"
 }
 
-# ─── Определение ОС ──────────────────────────────────────────────────────────
+# ---- OS detection -----------------------------------------------------------
 detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        source /etc/os-release
-        OS=$ID
-        OS_VERSION=$VERSION_ID
-    else
-        error "Не удалось определить ОС. Поддерживаются: Ubuntu, Debian, CentOS, Rocky, Alma."
-    fi
-
+    [[ -f /etc/os-release ]] || error "Ne udalos opredlelit OS."
+    source /etc/os-release
+    OS="${ID:-unknown}"
+    OS_PRETTY="${PRETTY_NAME:-$OS}"
     case $OS in
-        ubuntu|debian)  PKG_MANAGER="apt" ;;
+        ubuntu|debian)               PKG_MANAGER="apt" ;;
         centos|rhel|rocky|almalinux) PKG_MANAGER="yum" ;;
-        *) error "Неподдерживаемая ОС: $OS" ;;
+        *) error "OS ne podderzhivaetsya: $OS" ;;
     esac
-
-    info "Система: ${BOLD}${PRETTY_NAME}${NC}"
+    info "Sistema: ${BOLD}${OS_PRETTY}${NC}"
 }
 
-# ─── Анализ характеристик сервера ────────────────────────────────────────────
+# ---- server analysis --------------------------------------------------------
 analyze_server() {
-    step "Анализ характеристик сервера"
+    step "Analiz kharakteristik servera"
 
-    # ── Сбор данных о железе ───────────────────────────────────────────────
+    local cpu_cores cpu_mhz cpu_model
+    local ram_total_gb ram_avail_mb
+    local disk_free_gb load_avg
+    local net_iface net_speed aes_ni
 
-    # CPU
-    CPU_CORES=$(nproc)
-    CPU_MHZ=$(awk '/cpu MHz/ {sum+=$4; n++} END {if(n>0) printf "%d", sum/n; else print "?"}' /proc/cpuinfo)
-    CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | xargs)
+    cpu_cores=$(nproc)
+    cpu_mhz=$(awk '/cpu MHz/{s+=$4;n++} END{if(n)printf "%d",s/n; else print "?"}' /proc/cpuinfo)
+    cpu_model=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | xargs | cut -c1-26)
 
-    # RAM
-    RAM_TOTAL_MB=$(awk '/MemTotal/  {printf "%d", $2/1024}' /proc/meminfo)
-    RAM_AVAIL_MB=$(awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo)
-    RAM_TOTAL_GB=$(awk '/MemTotal/  {printf "%.1f", $2/1024/1024}' /proc/meminfo)
+    ram_total_gb=$(awk '/MemTotal/{printf "%.1f",$2/1024/1024}' /proc/meminfo)
+    ram_avail_mb=$(awk '/MemAvailable/{printf "%d",$2/1024}' /proc/meminfo)
 
-    # Диск
-    DISK_FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
+    disk_free_gb=$(df -BG / | awk 'NR==2{gsub("G","");print $4}')
+    load_avg=$(awk '{printf "%.2f",$1}' /proc/loadavg)
 
-    # Текущая нагрузка (load average за 1 мин)
-    LOAD_AVG=$(awk '{printf "%.2f", $1}' /proc/loadavg)
-
-    # Сеть: пытаемся определить реальную скорость интерфейса
-    NET_IFACE=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
-    NET_SPEED=1000  # дефолт: 1 Гбит/с (типично для VPS)
-    if [[ -n "$NET_IFACE" ]]; then
-        # /sys/class/net быстрее и надёжнее ethtool на VPS
-        SYS_SPEED=$(cat /sys/class/net/${NET_IFACE}/speed 2>/dev/null || echo "")
-        if [[ -n "$SYS_SPEED" && "$SYS_SPEED" -gt 0 ]] 2>/dev/null; then
-            NET_SPEED=$SYS_SPEED
-        fi
+    net_iface=$(ip route get 8.8.8.8 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1);exit}}')
+    net_iface="${net_iface:-eth0}"
+    net_speed=1000
+    local _spd
+    _spd=$(cat /sys/class/net/${net_iface}/speed 2>/dev/null || echo "")
+    if [[ -n "$_spd" ]] && (( _spd > 0 && _spd <= 100000 )) 2>/dev/null; then
+        net_speed=$_spd
     fi
-    # Защита от безумных значений (некоторые VPS возвращают 65535 или -1)
-    [[ $NET_SPEED -gt 100000 || $NET_SPEED -le 0 ]] 2>/dev/null && NET_SPEED=1000
 
-    # ── Реалистичный расчёт (на основе реальных замеров) ──────────────────
-    #
-    # Как работает MTProxy на самом деле:
-    #   — Прокси работает ТОЛЬКО на этапе установки сессии MTProto.
-    #     После хендшейка медиа (фото, видео, файлы) идут напрямую
-    #     между клиентом и DC Telegram, минуя прокси.
-    #   — Через прокси проходят: служебные сообщения, текст, уведомления.
-    #     Это очень легкий трафик (~1–5 КБ/с на активного юзера в чате,
-    #     ~0 КБ/с на idle-пользователя).
-    #   — Telegram открывает 3–8 TCP-соединений на одного пользователя.
-    #     Берём среднее: 5 соединений/юзер.
-    #   — RAM на соединение: ~20–40 КБ (буферы ядра + userspace MTProxy).
-    #     Реальный замер: 4 ядра / 8 ГБ RAM держат 90k соединений = 18k юзеров.
-    #   — CPU: шифрование AES-256-CTR — ~15k соединений на ядро (без AES-NI),
-    #     с AES-NI (все современные VPS) до 50k+ соединений на ядро.
-    #
-    # Источники: seriyps/mtproto_proxy (90k conn / 4 ядра / 8 ГБ),
-    #            реальные наблюдения операторов прокси.
-
-    CONNS_PER_USER=5          # TCP-соединений на одного пользователя
-    RAM_KB_PER_CONN=35        # КБ RAM на соединение (буферы)
-    RAM_OS_RESERVE_MB=256     # резерв для ОС и системных процессов
-
-    # Определяем наличие AES-NI (аппаратное ускорение шифрования)
     if grep -qw "aes" /proc/cpuinfo 2>/dev/null; then
-        AES_NI="да"
-        CONNS_PER_CORE=40000  # с AES-NI: ~40k соединений на ядро
+        aes_ni="yes"
     else
-        AES_NI="нет"
-        CONNS_PER_CORE=12000  # без AES-NI: ~12k соединений на ядро
+        aes_ni="no"
     fi
 
-    # Лимит по CPU (соединения → пользователи)
-    LIMIT_CPU_CONNS=$(( CPU_CORES * CONNS_PER_CORE ))
-    LIMIT_CPU=$(( LIMIT_CPU_CONNS / CONNS_PER_USER ))
+    # -- capacity calculation -------------------------------------------------
+    #
+    # Sources:
+    #  [1] hub.docker.com/r/telegrammessenger/proxy:
+    #      "A worker handles up to 60,000 connections."
+    #  [2] seriyps/mtproto_proxy docs:
+    #      "Telegram opens 3 to 8 TCP connections per client" -> avg 5
+    #      "1Gbps / 4-core / 8GB RAM -> 90k connections"
+    #  [3] Real operator data (rameerez, 1 year, 512MB/2vCPU):
+    #      "99.9% CPU idle at ~40 active clients, peak 200 clients, no sweat"
+    #      "MTProxy only handles auth/setup; media goes direct to Telegram DCs"
+    #      "Total traffic in 1 year: ~17 MB" (basically nothing)
+    #
+    # Key insight: MTProxy is I/O-bound, not CPU-bound.
+    # The bottleneck on small servers is almost always RAM (open sockets).
+    #
+    # Parameters per user:
+    #   TCP connections  : 5  (average of 3-8)
+    #   RAM per conn     : 40 KB (kernel socket buffers + MTProxy userspace)
+    #   Traffic per user : 2 KB/s average (text + notifications only)
+    #     -> use 5 KB/s (40 Kbit/s) as conservative budget
+    #   OS RAM reserve   : 256 MB
+    #
+    # CPU limit (official Telegram cap):
+    #   with AES-NI  : 60,000 conn/core -> 12,000 users/core
+    #   without      : 12,000 conn/core ->  2,400 users/core
+    #
+    # "Connected users" = holding a session (idle is fine, uses only RAM).
+    # "Active users"    = writing right now, ~10% of connected at any moment.
 
-    # Лимит по RAM
-    # Доступная RAM минус резерв ОС → делим на (КБ/соединение × 1024) → в пользователей
-    RAM_FOR_PROXY_MB=$(( RAM_AVAIL_MB - RAM_OS_RESERVE_MB ))
-    [[ $RAM_FOR_PROXY_MB -lt 64 ]] && RAM_FOR_PROXY_MB=64
-    RAM_FOR_PROXY_KB=$(( RAM_FOR_PROXY_MB * 1024 ))
-    LIMIT_RAM_CONNS=$(( RAM_FOR_PROXY_KB / RAM_KB_PER_CONN ))
-    LIMIT_RAM=$(( LIMIT_RAM_CONNS / CONNS_PER_USER ))
+    local conns_per_user=5
+    local ram_kb_per_conn=40
+    local ram_os_reserve_mb=256
+    local net_kbps_per_user=40   # 5 KB/s * 8 bit
 
-    # Лимит по сети
-    # Служебный трафик через прокси: ~3 КБ/с на активного юзера в среднем.
-    # Пиковый (все пишут одновременно): ~15 КБ/с.
-    # Считаем по среднему с запасом: 5 КБ/с = 40 Кбит/с на пользователя.
-    # При этом используем 85% пропускной способности (запас на ACK-пакеты и overhead).
-    NET_USABLE_KBPS=$(( NET_SPEED * 1000 * 85 / 100 ))  # Мбит → Кбит, 85%
-    TRAFFIC_PER_USER_KBPS=40
-    LIMIT_NET=$(( NET_USABLE_KBPS / TRAFFIC_PER_USER_KBPS ))
+    local conns_per_core
+    if [[ "$aes_ni" == "yes" ]]; then
+        conns_per_core=60000
+    else
+        conns_per_core=12000
+    fi
 
-    # Лимит по открытым файловым дескрипторам (каждое соединение = 1 fd)
-    # Системный лимит по умолчанию 65535 fd, мы его поднимем в сервисе до 1M
-    # но на старых ядрах может быть жёстче. Считаем по 1M / 5 = 200k юзеров —
-    # это никогда не будет узким местом на реальных серверах.
-    LIMIT_FD=200000
+    local limit_cpu_conns limit_cpu
+    limit_cpu_conns=$(( cpu_cores * conns_per_core ))
+    limit_cpu=$(( limit_cpu_conns / conns_per_user ))
 
-    # Итоговый минимум — реальный bottleneck
-    MAX_USERS=$LIMIT_CPU
-    [[ $LIMIT_RAM -lt $MAX_USERS ]]  && MAX_USERS=$LIMIT_RAM
-    [[ $LIMIT_NET -lt $MAX_USERS ]]  && MAX_USERS=$LIMIT_NET
-    [[ $LIMIT_FD  -lt $MAX_USERS ]]  && MAX_USERS=$LIMIT_FD
+    local ram_proxy_mb limit_ram_conns limit_ram
+    ram_proxy_mb=$(( ram_avail_mb - ram_os_reserve_mb ))
+    [[ $ram_proxy_mb -lt 32 ]] && ram_proxy_mb=32
+    limit_ram_conns=$(( ram_proxy_mb * 1024 / ram_kb_per_conn ))
+    limit_ram=$(( limit_ram_conns / conns_per_user ))
 
-    # Определяем узкое место (что первым ограничит рост)
+    local net_usable_kbps limit_net
+    net_usable_kbps=$(( net_speed * 1000 * 85 / 100 ))
+    limit_net=$(( net_usable_kbps / net_kbps_per_user ))
+
+    MAX_USERS=$limit_cpu
     BOTTLENECK="CPU"
-    MIN_VAL=$LIMIT_CPU
-    [[ $LIMIT_RAM -lt $MIN_VAL ]] && { MIN_VAL=$LIMIT_RAM; BOTTLENECK="RAM"; }
-    [[ $LIMIT_NET -lt $MIN_VAL ]] && { MIN_VAL=$LIMIT_NET; BOTTLENECK="Сеть"; }
+    if (( limit_ram < MAX_USERS )); then MAX_USERS=$limit_ram; BOTTLENECK="RAM"; fi
+    if (( limit_net < MAX_USERS )); then MAX_USERS=$limit_net; BOTTLENECK="Net"; fi
 
-    # Количество воркеров = кол-во ядер (не больше 16 — ограничение MTProxy)
-    WORKERS=$CPU_CORES
-    [[ $WORKERS -gt 16 ]] && WORKERS=16
+    local active_users=$(( MAX_USERS / 10 ))
+    [[ $active_users -lt 1 ]] && active_users=1
 
-    # ── Оценка класса сервера ───────────────────────────────────────────────
-    if   [[ $MAX_USERS -ge 10000 ]]; then TIER="${GREEN}${BOLD}★★★★ Мощный сервер${NC}"
-    elif [[ $MAX_USERS -ge 3000  ]]; then TIER="${GREEN}★★★☆ Высокая нагрузка${NC}"
-    elif [[ $MAX_USERS -ge 500   ]]; then TIER="${CYAN}★★☆☆ Средняя нагрузка${NC}"
-    elif [[ $MAX_USERS -ge 100   ]]; then TIER="${YELLOW}★☆☆☆ Лёгкая нагрузка${NC}"
-    else                                   TIER="${RED}☆☆☆☆ Минимальная${NC}"
+    WORKERS=$cpu_cores
+    (( WORKERS > 16 )) && WORKERS=16
+
+    local tier
+    if   (( MAX_USERS >= 10000 )); then tier="**** Powerful server"
+    elif (( MAX_USERS >= 3000  )); then tier="***- High load"
+    elif (( MAX_USERS >= 500   )); then tier="**-- Medium load"
+    elif (( MAX_USERS >= 100   )); then tier="*--- Light load"
+    else                                tier="---- Minimal"
     fi
 
-    echo ""
-    echo -e "  ${BOLD}┌──────────────────────────────────────────────┐${NC}"
-    echo -e "  ${BOLD}│          Характеристики сервера              │${NC}"
-    echo -e "  ${BOLD}├──────────────────────────────────────────────┤${NC}"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "CPU:"      "${CPU_CORES} ядер @ ${CPU_MHZ} МГц"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "Модель:"   "${CPU_MODEL:0:30}"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "AES-NI:"   "${AES_NI} (аппарат. шифрование)"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "RAM всего:"    "${RAM_TOTAL_GB} ГБ"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "RAM свободно:" "${RAM_AVAIL_MB} МБ доступно"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "Диск:"     "Свободно ${DISK_FREE_GB} ГБ"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "Сеть:"     "${NET_SPEED} Мбит/с (${NET_IFACE:-eth0})"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "Load avg:" "${LOAD_AVG} (сейчас)"
-    echo -e "  ${BOLD}├──────────────────────────────────────────────┤${NC}"
-    echo -e "  ${BOLD}│${NC}  ${DIM}Лимиты (соединений → уникальных польз.)${NC}    ${BOLD}│${NC}"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "CPU:"      "~${LIMIT_CPU_CONNS} conn → ~${LIMIT_CPU} польз."
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "RAM:"      "~${LIMIT_RAM_CONNS} conn → ~${LIMIT_RAM} польз."
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "Сеть:"     "~${NET_USABLE_KBPS} Кбит/с → ~${LIMIT_NET} польз."
-    echo -e "  ${BOLD}├──────────────────────────────────────────────┤${NC}"
-    printf  "  ${BOLD}│${NC}  ${GREEN}${BOLD}%-13s${NC} ${BOLD}%-30s${NC} ${BOLD}│${NC}\n" "Макс. польз.:" "≈ ${MAX_USERS} одновременно"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "Воркеры:"  "${WORKERS} (по числу ядер)"
-    printf  "  ${BOLD}│${NC}  %-13s %-30s ${BOLD}│${NC}\n" "Узкое место:" "${BOTTLENECK}"
-    printf  "  ${BOLD}│${NC}  %-13s " "Класс:"; echo -e "${TIER}               ${BOLD}│${NC}"
-    echo -e "  ${BOLD}└──────────────────────────────────────────────┘${NC}"
-    echo ""
+    local aes_label
+    [[ "$aes_ni" == "yes" ]] && aes_label="yes (hardware AES)" || aes_label="no (software AES)"
 
-    info "Расчёт учитывает: 5 TCP-соединений/юзер, ${RAM_KB_PER_CONN} КБ RAM/соединение,"
-    info "трафик ~5 КБ/с/юзер (только служебные данные, медиа идёт напрямую к DC)."
+    echo ""
+    ttop
+    thead "     Server characteristics"
+    tsep
+    trow "CPU:" "${cpu_cores} cores @ ${cpu_mhz} MHz"
+    trow "Model:" "${cpu_model}"
+    trow "AES-NI:" "${aes_label}"
+    trow "RAM total:" "${ram_total_gb} GB"
+    trow "RAM free:" "${ram_avail_mb} MB available"
+    trow "Disk free:" "${disk_free_gb} GB"
+    trow "Network:" "${net_speed} Mbit/s (${net_iface})"
+    trow "Load avg:" "${load_avg}"
+    tsep
+    thead "  Capacity limits (conn -> users)"
+    tsep
+    trow "CPU:" "$(printf '%d conn -> ~%d users' $limit_cpu_conns $limit_cpu)"
+    trow "RAM:" "$(printf '%d conn -> ~%d users' $limit_ram_conns $limit_ram)"
+    trow "Network:" "$(printf '~%d Kbps -> ~%d users' $net_usable_kbps $limit_net)"
+    tsep
+    trow "Connected:" "~${MAX_USERS} (hold session)"
+    trow "Active:" "~${active_users} (active ~10%)"
+    trow "Workers:" "${WORKERS}"
+    trow "Bottleneck:" "${BOTTLENECK}"
+    trow "Tier:" "${tier}"
+    tbot
+    echo ""
+    info "Connected = idle sessions; Active = actually writing right now."
+    info "Media (photos/video) goes direct to Telegram DCs, NOT through proxy."
 }
 
-# ─── Установка зависимостей ───────────────────────────────────────────────────
+# ---- install deps -----------------------------------------------------------
 install_deps() {
-    step "Установка зависимостей"
-
+    step "Ustanovka zavisimostei"
     if [[ $PKG_MANAGER == "apt" ]]; then
         apt-get update -qq
-        apt-get install -y -qq \
-            git curl build-essential libssl-dev zlib1g-dev xxd net-tools 2>/dev/null \
-            || apt-get install -y git curl build-essential libssl-dev zlib1g-dev xxd net-tools
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            git curl build-essential libssl-dev zlib1g-dev xxd 2>/dev/null
     else
-        yum install -y -q git curl openssl-devel zlib-devel xxd net-tools
-        yum groupinstall -y "Development Tools" -q
+        yum install -y -q git curl openssl-devel zlib-devel xxd
+        yum groupinstall -y -q "Development Tools"
     fi
-
-    success "Зависимости установлены"
+    success "Zavisimosti ustanovleny"
 }
 
-# ─── Сборка MTProxy ───────────────────────────────────────────────────────────
+# ---- build MTProxy ----------------------------------------------------------
 build_mtproxy() {
-    step "Сборка MTProxy из исходников"
+    step "Sborka MTProxy"
 
-    INSTALL_DIR="/opt/mtproxy"
     rm -rf "$INSTALL_DIR"
     mkdir -p "$INSTALL_DIR"
 
-    # Клонируем репозиторий
-    info "Клонирование репозитория..."
-    git clone -q https://github.com/TelegramMessenger/MTProxy "$INSTALL_DIR/src" \
-        || error "Не удалось клонировать репозиторий. Проверьте интернет-соединение."
+    # NOTE: We clone GetPageSpeed/MTProxy (community-maintained fork), NOT the
+    # official TelegramMessenger/MTProxy which is abandoned and breaks on
+    # modern GCC (>= 10) due to missing -fcommon flag.
+    info "Klonirovanie forka MTProxy (GetPageSpeed)..."
+    git clone -q --depth 1 \
+        https://github.com/GetPageSpeed/MTProxy \
+        "$INSTALL_DIR/src" \
+        || error "Oshibka klonirovaniya. Proverte internet."
 
     cd "$INSTALL_DIR/src"
 
-    info "Компиляция (это займёт ~1–2 минуты)..."
-    make -j"$CPU_CORES" 2>/dev/null || make 2>/dev/null \
-        || error "Ошибка компиляции. Возможно, не хватает зависимостей."
+    # Patch Makefile: add -fcommon to fix multiple-definition linker errors on GCC >= 10
+    if grep -q "COMMON_CFLAGS" Makefile 2>/dev/null; then
+        sed -i '/COMMON_CFLAGS/s/$/ -fcommon/' Makefile
+        sed -i '/COMMON_LDFLAGS/s/$/ -fcommon/' Makefile
+        info "Makefile patched: -fcommon added for GCC >= 10 compatibility"
+    fi
 
+    local ncpu
+    ncpu=$(nproc)
+    info "Kompilyatsiya na ${ncpu} yadrakh (1-3 minuty)..."
+    make -j"$ncpu" 2>/dev/null \
+        || make 2>/dev/null \
+        || error "Oshibka kompilyatsii. Proverte zavisimosti."
+
+    [[ -f objs/bin/mtproto-proxy ]] || error "Binarnik ne nayden posle sborki."
     cp objs/bin/mtproto-proxy "$INSTALL_DIR/"
+    chmod +x "$INSTALL_DIR/mtproto-proxy"
     cd "$INSTALL_DIR"
-
-    success "MTProxy собран успешно"
+    success "MTProxy sobran uspeshno"
 }
 
-# ─── Генерация секрета и загрузка конфигов ───────────────────────────────────
+# ---- config -----------------------------------------------------------------
 setup_config() {
-    step "Генерация секрета и загрузка конфигурации"
+    step "Generatsiya sekreta i zagruzka konfiguratsii"
 
-    INSTALL_DIR="/opt/mtproxy"
     cd "$INSTALL_DIR"
 
-    # Скачиваем секреты и конфиг Telegram
-    info "Загрузка конфигурации от Telegram..."
-    curl -s https://core.telegram.org/getProxySecret -o proxy-secret \
-        || error "Не удалось загрузить proxy-secret. Проверьте интернет."
-    curl -s https://core.telegram.org/getProxyConfig -o proxy-multi.conf \
-        || error "Не удалось загрузить proxy-multi.conf. Проверьте интернет."
+    info "Zagruzka konfiguratsii ot Telegram..."
+    curl -fsSL --max-time 15 https://core.telegram.org/getProxySecret \
+        -o proxy-secret   || error "Ne udalos zagruzit proxy-secret."
+    curl -fsSL --max-time 15 https://core.telegram.org/getProxyConfig \
+        -o proxy-multi.conf || error "Ne udalos zagruzit proxy-multi.conf."
 
-    # Генерируем секрет пользователя
-    # dd+xxd: переносимее чем openssl rand на старых системах
     SECRET=$(head -c 16 /dev/urandom | xxd -ps)
-    success "Секрет сгенерирован"
-
-    # Сохраняем в файл чтобы не потерять
     echo "$SECRET" > "$INSTALL_DIR/secret.txt"
     chmod 600 "$INSTALL_DIR/secret.txt"
+    success "Sekret sgenerirovan"
 
-    # Определяем внешний IP
-    info "Определение внешнего IP..."
-    PUBLIC_IP=$(curl -s --max-time 5 https://api.ipify.org \
-             || curl -s --max-time 5 https://ifconfig.me \
-             || curl -s --max-time 5 https://icanhazip.com \
-             || echo "YOUR_SERVER_IP")
-
-    success "IP сервера: ${BOLD}${PUBLIC_IP}${NC}"
+    info "Opredelenie vneshnego IP..."
+    PUBLIC_IP=""
+    for svc in \
+        "https://api.ipify.org" \
+        "https://ifconfig.me/ip" \
+        "https://icanhazip.com" \
+        "https://checkip.amazonaws.com"
+    do
+        PUBLIC_IP=$(curl -fsSL --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]')
+        [[ -n "$PUBLIC_IP" ]] && break
+    done
+    [[ -z "$PUBLIC_IP" ]] && PUBLIC_IP="YOUR_SERVER_IP"
+    success "Vneshniy IP: ${BOLD}${PUBLIC_IP}${NC}"
 }
 
-# ─── Создание systemd сервиса ─────────────────────────────────────────────────
+# ---- systemd service --------------------------------------------------------
 create_service() {
-    step "Создание systemd сервиса"
+    step "Sozdanie systemd servisa"
 
-    INSTALL_DIR="/opt/mtproxy"
-    PORT=443
+    local local_ip nat_line=""
+    local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+    if [[ -n "$local_ip" && "$local_ip" != "$PUBLIC_IP" ]]; then
+        nat_line="    --nat-info ${local_ip}:${PUBLIC_IP} \\"$'\n'
+    fi
 
     cat > /etc/systemd/system/mtproxy.service << EOF
 [Unit]
 Description=Telegram MTProxy Server
-After=network.target
+Documentation=https://github.com/sxcvio/Auto-MTProto
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=nobody
+User=root
 WorkingDirectory=${INSTALL_DIR}
-ExecStartPre=/bin/bash -c 'curl -s https://core.telegram.org/getProxyConfig -o ${INSTALL_DIR}/proxy-multi.conf'
-ExecStart=${INSTALL_DIR}/mtproto-proxy \\
-    -u nobody \\
-    -p 8888 \\
-    -H ${PORT} \\
-    -S ${SECRET} \\
-    --aes-pwd ${INSTALL_DIR}/proxy-secret ${INSTALL_DIR}/proxy-multi.conf \\
+ExecStart=${INSTALL_DIR}/mtproto-proxy \
+    -u nobody \
+    -p 8888 \
+    -H ${PORT} \
+    -S ${SECRET} \
+${nat_line}    --aes-pwd ${INSTALL_DIR}/proxy-secret ${INSTALL_DIR}/proxy-multi.conf \
     -M ${WORKERS}
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
 LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # Настройка лимита файлов для большого числа соединений
-    cat > /etc/security/limits.d/mtproxy.conf << EOF
-nobody soft nofile 1048576
-nobody hard nofile 1048576
-EOF
+    cat > /etc/security/limits.d/99-mtproxy.conf << 'LIMITS'
+* soft nofile 1048576
+* hard nofile 1048576
+LIMITS
 
-    # Поднимаем системный лимит fs.file-max если нужно
-    CURRENT_FILEMAX=$(sysctl -n fs.file-max 2>/dev/null || echo 0)
-    if [[ $CURRENT_FILEMAX -lt 1048576 ]]; then
+    if ! grep -q "fs.file-max" /etc/sysctl.conf 2>/dev/null; then
         echo "fs.file-max = 1048576" >> /etc/sysctl.conf
-        sysctl -p -q 2>/dev/null || true
     fi
+    sysctl -p -q 2>/dev/null || true
 
     systemctl daemon-reload
-    systemctl enable mtproxy -q
+    systemctl enable mtproxy -q 2>/dev/null || true
     systemctl start mtproxy
 
-    sleep 2
+    sleep 3
 
     if systemctl is-active --quiet mtproxy; then
-        success "Сервис запущен и добавлен в автозагрузку"
+        success "Servis zapushchen i dobavlen v avtozagruzku"
     else
-        warn "Сервис не запустился. Проверьте логи: journalctl -u mtproxy -n 30"
+        warn "Servis ne zapustilsya. Poslednie stroki loga:"
+        echo ""
+        journalctl -u mtproxy -n 20 --no-pager 2>/dev/null || true
+        echo ""
+        warn "Komandy dlya diagnostiki:"
+        warn "  systemctl status mtproxy"
+        warn "  journalctl -u mtproxy -f"
     fi
 }
 
-# ─── Настройка автообновления конфига ────────────────────────────────────────
+# ---- cron -------------------------------------------------------------------
 setup_cron() {
-    step "Настройка автообновления конфигурации"
+    step "Nastroyka avtobnovleniya konfiguratsii"
 
-    INSTALL_DIR="/opt/mtproxy"
+    cat > /etc/cron.d/mtproxy-update << CRONEOF
+# MTProxy: update Telegram config daily at 03:00
+0 3 * * * root curl -fsSL --max-time 30 https://core.telegram.org/getProxyConfig -o ${INSTALL_DIR}/proxy-multi.conf && systemctl restart mtproxy
+CRONEOF
 
-    # Ежедневное обновление конфига Telegram и перезапуск
-    cat > /etc/cron.d/mtproxy-update << EOF
-# Обновление конфигурации MTProxy каждый день в 03:00
-0 3 * * * root curl -s https://core.telegram.org/getProxyConfig -o ${INSTALL_DIR}/proxy-multi.conf && systemctl restart mtproxy
-EOF
-
-    success "Автообновление настроено (ежедневно в 03:00)"
+    chmod 644 /etc/cron.d/mtproxy-update
+    success "Avtoobnovlenie nastroeno (ezhednevno v 03:00)"
 }
 
-# ─── Открытие порта в firewall ────────────────────────────────────────────────
+# ---- firewall ---------------------------------------------------------------
 setup_firewall() {
-    step "Настройка файрвола"
+    step "Nastroyka fayervola"
 
-    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-        ufw allow 443/tcp -q 2>/dev/null && success "UFW: порт 443 открыт" || warn "UFW: не удалось открыть порт"
-    elif command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --permanent --add-port=443/tcp -q 2>/dev/null \
-        && firewall-cmd --reload -q \
-        && success "firewalld: порт 443 открыт" || warn "firewalld: не удалось открыть порт"
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+        ufw allow ${PORT}/tcp comment "MTProxy" -q 2>/dev/null \
+            && success "UFW: port ${PORT}/tcp otkryt" \
+            || warn "UFW: ne udalos otkryt port -- vypolnite vruchnuyu: ufw allow ${PORT}/tcp"
+    elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port=${PORT}/tcp -q 2>/dev/null \
+            && firewall-cmd --reload -q \
+            && success "firewalld: port ${PORT}/tcp otkryt" \
+            || warn "firewalld: ne udalos otkryt port"
     else
-        info "UFW/firewalld не обнаружены. Если используете iptables — откройте порт 443 вручную."
+        info "Fayervol ne obnaruzhen. Dlya iptables:"
+        info "  iptables -A INPUT -p tcp --dport ${PORT} -j ACCEPT"
     fi
 }
 
-# ─── Итоговый вывод ───────────────────────────────────────────────────────────
+# ---- result -----------------------------------------------------------------
 print_result() {
-    PORT=443
-
-    # Ссылка для подключения (формат официальный)
-    PROXY_LINK="https://t.me/proxy?server=${PUBLIC_IP}&port=${PORT}&secret=${SECRET}"
+    local proxy_link="https://t.me/proxy?server=${PUBLIC_IP}&port=${PORT}&secret=${SECRET}"
 
     echo ""
     echo -e "${GREEN}${BOLD}"
-    echo "  ╔═══════════════════════════════════════════╗"
-    echo "  ║      ✅  Установка завершена успешно!      ║"
-    echo "  ╚═══════════════════════════════════════════╝"
+    echo "  +=========================================+"
+    echo "  |   OK  Ustanovka zavershena uspeshno!    |"
+    echo "  +=========================================+"
     echo -e "${NC}"
-    echo -e "  ${BOLD}Данные для подключения:${NC}"
+
+    echo -e "  ${BOLD}Dannye dlya podklyucheniya:${NC}"
     echo ""
-    echo -e "  ${DIM}Сервер:${NC}  ${BOLD}${PUBLIC_IP}${NC}"
-    echo -e "  ${DIM}Порт:${NC}    ${BOLD}${PORT}${NC}"
-    echo -e "  ${DIM}Секрет:${NC}  ${BOLD}${SECRET}${NC}"
+    echo -e "  ${DIM}Server:${NC}   ${BOLD}${PUBLIC_IP}${NC}"
+    echo -e "  ${DIM}Port:${NC}     ${BOLD}${PORT}${NC}"
+    echo -e "  ${DIM}Secret:${NC}   ${BOLD}${SECRET}${NC}"
     echo ""
-    echo -e "  ${BOLD}${CYAN}Ссылка для подключения (отправьте друзьям):${NC}"
+    echo -e "  ${CYAN}${BOLD}Ssylka -- nazhmite ili otpravte druziyam:${NC}"
     echo ""
-    echo -e "  ${GREEN}${BOLD}${PROXY_LINK}${NC}"
+    echo -e "  ${GREEN}${BOLD}${proxy_link}${NC}"
     echo ""
-    echo -e "  ${DIM}────────────────────────────────────────────────────────${NC}"
-    echo -e "  ${BOLD}Возможности сервера:${NC} ~${MAX_USERS} одновременных пользователей"
-    echo -e "  ${DIM}────────────────────────────────────────────────────────${NC}"
+    echo -e "  ${DIM}------------------------------------------------------${NC}"
+    echo -e "  Max users: ~${MAX_USERS} (connected) | Bottleneck: ${BOTTLENECK}"
+    echo -e "  ${DIM}------------------------------------------------------${NC}"
     echo ""
-    echo -e "  ${BOLD}Как подключиться в Telegram:${NC}"
-    echo -e "  ${DIM}1. Нажмите на ссылку выше — Telegram откроется автоматически${NC}"
-    echo -e "  ${DIM}2. Или вручную: Настройки → Данные и память → Прокси${NC}"
-    echo -e "  ${DIM}   Тип: MTProto, Сервер: ${PUBLIC_IP}, Порт: ${PORT}, Секрет: ${SECRET}${NC}"
+    echo -e "  ${BOLD}Poleznye komandy:${NC}"
+    echo -e "  ${CYAN}systemctl status mtproxy${NC}          -- status"
+    echo -e "  ${CYAN}journalctl -u mtproxy -f${NC}           -- logi"
+    echo -e "  ${CYAN}systemctl restart mtproxy${NC}         -- perezapusk"
+    echo -e "  ${CYAN}curl http://127.0.0.1:8888/stats${NC}  -- statistika"
+    echo -e "  ${CYAN}cat ${INSTALL_DIR}/secret.txt${NC}     -- sekret"
     echo ""
-    echo -e "  ${BOLD}Полезные команды:${NC}"
-    echo -e "  ${DIM}Статус:     ${CYAN}systemctl status mtproxy${NC}"
-    echo -e "  ${DIM}Логи:       ${CYAN}journalctl -u mtproxy -f${NC}"
-    echo -e "  ${DIM}Перезапуск: ${CYAN}systemctl restart mtproxy${NC}"
-    echo -e "  ${DIM}Секрет:     ${CYAN}cat /opt/mtproxy/secret.txt${NC}"
+    echo -e "  ${YELLOW}Monetizatsiya: @MTProxyBot -> /newproxy -> dobavte -P <TAG>${NC}"
     echo ""
-    echo -e "  ${YELLOW}💡 Хотите монетизировать прокси? Напишите @MTProxyBot в Telegram${NC}"
-    echo "     команду /newproxy и получите TAG для продвижения своего канала."
-    echo ""
-    echo -e "  ${DIM}────────────────────────────────────────────────────────${NC}"
-    echo -e "  ${DIM}  Скрипт создан автором ${NC}${BOLD}SXCVIO${NC}"
-    echo -e "  ${DIM}────────────────────────────────────────────────────────${NC}"
+    echo -e "  ${DIM}------------------------------------------------------${NC}"
+    echo -e "  ${DIM}Avtor: ${NC}${BOLD}SXCVIO${NC}${DIM} | github.com/sxcvio/Auto-MTProto${NC}"
+    echo -e "  ${DIM}------------------------------------------------------${NC}"
     echo ""
 }
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# ---- main -------------------------------------------------------------------
 main() {
     print_banner
     check_root
