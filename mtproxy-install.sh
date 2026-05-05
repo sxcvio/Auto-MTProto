@@ -77,34 +77,34 @@ print_banner() {
     echo "  |M|T|P|  |P|r|o|x|y|"
     echo "  +-+-+-+  +-+-+-+-+-+"
     echo -e "${NC}"
-    echo -e "  ${DIM}Telegram MTProxy -- Avtomaticheskaya ustanovka${NC}"
+    echo -e "  ${DIM}Telegram MTProxy -- Automatic Installer${NC}"
     echo -e "  ${DIM}----------------------------------------------${NC}"
-    echo -e "  ${DIM}Avtor: ${NC}${BOLD}SXCVIO${NC}"
+    echo -e "  ${DIM}Author: ${NC}${BOLD}SXCVIO${NC}"
     echo ""
 }
 
 # ---- root check -------------------------------------------------------------
 check_root() {
-    [[ $EUID -eq 0 ]] || error "Zapustite ot root: sudo bash $0"
+    [[ $EUID -eq 0 ]] || error "Run as root: sudo bash $0"
 }
 
 # ---- OS detection -----------------------------------------------------------
 detect_os() {
-    [[ -f /etc/os-release ]] || error "Ne udalos opredlelit OS."
+    [[ -f /etc/os-release ]] || error "Could not detect OS."
     source /etc/os-release
     OS="${ID:-unknown}"
     OS_PRETTY="${PRETTY_NAME:-$OS}"
     case $OS in
         ubuntu|debian)               PKG_MANAGER="apt" ;;
         centos|rhel|rocky|almalinux) PKG_MANAGER="yum" ;;
-        *) error "OS ne podderzhivaetsya: $OS" ;;
+        *) error "Unsupported OS: $OS" ;;
     esac
-    info "Sistema: ${BOLD}${OS_PRETTY}${NC}"
+    info "System: ${BOLD}${OS_PRETTY}${NC}"
 }
 
 # ---- server analysis --------------------------------------------------------
 analyze_server() {
-    step "Analiz kharakteristik servera"
+    step "Analyzing server hardware"
 
     local cpu_cores cpu_mhz cpu_model
     local ram_total_gb ram_avail_mb
@@ -247,7 +247,7 @@ analyze_server() {
 
 # ---- install deps -----------------------------------------------------------
 install_deps() {
-    step "Ustanovka zavisimostei"
+    step "Installing dependencies"
     if [[ $PKG_MANAGER == "apt" ]]; then
         apt-get update -qq
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
@@ -256,12 +256,12 @@ install_deps() {
         yum install -y -q git curl openssl-devel zlib-devel xxd
         yum groupinstall -y -q "Development Tools"
     fi
-    success "Zavisimosti ustanovleny"
+    success "Dependencies installed"
 }
 
 # ---- build MTProxy ----------------------------------------------------------
 build_mtproxy() {
-    step "Sborka MTProxy"
+    step "Building MTProxy from source"
 
     rm -rf "$INSTALL_DIR"
     mkdir -p "$INSTALL_DIR"
@@ -269,11 +269,11 @@ build_mtproxy() {
     # NOTE: We clone GetPageSpeed/MTProxy (community-maintained fork), NOT the
     # official TelegramMessenger/MTProxy which is abandoned and breaks on
     # modern GCC (>= 10) due to missing -fcommon flag.
-    info "Klonirovanie forka MTProxy (GetPageSpeed)..."
+    info "Cloning MTProxy fork (GetPageSpeed)..."
     git clone -q --depth 1 \
         https://github.com/GetPageSpeed/MTProxy \
         "$INSTALL_DIR/src" \
-        || error "Oshibka klonirovaniya. Proverte internet."
+        || error "Clone failed. Check your internet connection."
 
     cd "$INSTALL_DIR/src"
 
@@ -286,36 +286,36 @@ build_mtproxy() {
 
     local ncpu
     ncpu=$(nproc)
-    info "Kompilyatsiya na ${ncpu} yadrakh (1-3 minuty)..."
+    info "Compiling with ${ncpu} cores (1-3 min)..."
     make -j"$ncpu" 2>/dev/null \
         || make 2>/dev/null \
-        || error "Oshibka kompilyatsii. Proverte zavisimosti."
+        || error "Compilation failed. Check dependencies."
 
-    [[ -f objs/bin/mtproto-proxy ]] || error "Binarnik ne nayden posle sborki."
+    [[ -f objs/bin/mtproto-proxy ]] || error "Binary not found after build."
     cp objs/bin/mtproto-proxy "$INSTALL_DIR/"
     chmod +x "$INSTALL_DIR/mtproto-proxy"
     cd "$INSTALL_DIR"
-    success "MTProxy sobran uspeshno"
+    success "MTProxy built successfully"
 }
 
 # ---- config -----------------------------------------------------------------
 setup_config() {
-    step "Generatsiya sekreta i zagruzka konfiguratsii"
+    step "Generating secret and downloading config"
 
     cd "$INSTALL_DIR"
 
-    info "Zagruzka konfiguratsii ot Telegram..."
+    info "Downloading Telegram configuration..."
     curl -fsSL --max-time 15 https://core.telegram.org/getProxySecret \
-        -o proxy-secret   || error "Ne udalos zagruzit proxy-secret."
+        -o proxy-secret   || error "Failed to download proxy-secret."
     curl -fsSL --max-time 15 https://core.telegram.org/getProxyConfig \
-        -o proxy-multi.conf || error "Ne udalos zagruzit proxy-multi.conf."
+        -o proxy-multi.conf || error "Failed to download proxy-multi.conf."
 
     SECRET=$(head -c 16 /dev/urandom | xxd -ps)
     echo "$SECRET" > "$INSTALL_DIR/secret.txt"
     chmod 600 "$INSTALL_DIR/secret.txt"
-    success "Sekret sgenerirovan"
+    success "Secret generated"
 
-    info "Opredelenie vneshnego IP..."
+    info "Detecting public IP..."
     PUBLIC_IP=""
     for svc in \
         "https://api.ipify.org" \
@@ -327,12 +327,12 @@ setup_config() {
         [[ -n "$PUBLIC_IP" ]] && break
     done
     [[ -z "$PUBLIC_IP" ]] && PUBLIC_IP="YOUR_SERVER_IP"
-    success "Vneshniy IP: ${BOLD}${PUBLIC_IP}${NC}"
+    success "Public IP: ${BOLD}${PUBLIC_IP}${NC}"
 }
 
 # ---- systemd service --------------------------------------------------------
 create_service() {
-    step "Sozdanie systemd servisa"
+    step "Creating systemd service"
 
     local local_ip nat_line=""
     local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
@@ -385,13 +385,13 @@ LIMITS
     sleep 3
 
     if systemctl is-active --quiet mtproxy; then
-        success "Servis zapushchen i dobavlen v avtozagruzku"
+        success "Service started and enabled on boot"
     else
-        warn "Servis ne zapustilsya. Poslednie stroki loga:"
+        warn "Service failed to start. Last log lines:"
         echo ""
         journalctl -u mtproxy -n 20 --no-pager 2>/dev/null || true
         echo ""
-        warn "Komandy dlya diagnostiki:"
+        warn "Diagnostic commands:"
         warn "  systemctl status mtproxy"
         warn "  journalctl -u mtproxy -f"
     fi
@@ -399,7 +399,7 @@ LIMITS
 
 # ---- cron -------------------------------------------------------------------
 setup_cron() {
-    step "Nastroyka avtobnovleniya konfiguratsii"
+    step "Setting up automatic config update"
 
     cat > /etc/cron.d/mtproxy-update << CRONEOF
 # MTProxy: update Telegram config daily at 03:00
@@ -407,24 +407,24 @@ setup_cron() {
 CRONEOF
 
     chmod 644 /etc/cron.d/mtproxy-update
-    success "Avtoobnovlenie nastroeno (ezhednevno v 03:00)"
+    success "Auto-update configured (daily at 03:00)"
 }
 
 # ---- firewall ---------------------------------------------------------------
 setup_firewall() {
-    step "Nastroyka fayervola"
+    step "Configuring firewall"
 
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
         ufw allow ${PORT}/tcp comment "MTProxy" -q 2>/dev/null \
-            && success "UFW: port ${PORT}/tcp otkryt" \
-            || warn "UFW: ne udalos otkryt port -- vypolnite vruchnuyu: ufw allow ${PORT}/tcp"
+            && success "UFW: port ${PORT}/tcp opened" \
+            || warn "UFW: failed to open port -- run manually: ufw allow ${PORT}/tcp"
     elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
         firewall-cmd --permanent --add-port=${PORT}/tcp -q 2>/dev/null \
             && firewall-cmd --reload -q \
-            && success "firewalld: port ${PORT}/tcp otkryt" \
-            || warn "firewalld: ne udalos otkryt port"
+            && success "firewalld: port ${PORT}/tcp opened" \
+            || warn "firewalld: failed to open port"
     else
-        info "Fayervol ne obnaruzhen. Dlya iptables:"
+        info "No firewall detected. For iptables:"
         info "  iptables -A INPUT -p tcp --dport ${PORT} -j ACCEPT"
     fi
 }
@@ -436,17 +436,17 @@ print_result() {
     echo ""
     echo -e "${GREEN}${BOLD}"
     echo "  +=========================================+"
-    echo "  |   OK  Ustanovka zavershena uspeshno!    |"
+    echo "  |   OK  Installation complete!    |"
     echo "  +=========================================+"
     echo -e "${NC}"
 
-    echo -e "  ${BOLD}Dannye dlya podklyucheniya:${NC}"
+    echo -e "  ${BOLD}Connection details:${NC}"
     echo ""
     echo -e "  ${DIM}Server:${NC}   ${BOLD}${PUBLIC_IP}${NC}"
     echo -e "  ${DIM}Port:${NC}     ${BOLD}${PORT}${NC}"
     echo -e "  ${DIM}Secret:${NC}   ${BOLD}${SECRET}${NC}"
     echo ""
-    echo -e "  ${CYAN}${BOLD}Ssylka -- nazhmite ili otpravte druziyam:${NC}"
+    echo -e "  ${CYAN}${BOLD}Proxy link -- tap to connect or share:${NC}"
     echo ""
     echo -e "  ${GREEN}${BOLD}${proxy_link}${NC}"
     echo ""
@@ -454,17 +454,16 @@ print_result() {
     echo -e "  Max users: ~${MAX_USERS} (connected) | Bottleneck: ${BOTTLENECK}"
     echo -e "  ${DIM}------------------------------------------------------${NC}"
     echo ""
-    echo -e "  ${BOLD}Poleznye komandy:${NC}"
+    echo -e "  ${BOLD}Useful commands:${NC}"
     echo -e "  ${CYAN}systemctl status mtproxy${NC}          -- status"
-    echo -e "  ${CYAN}journalctl -u mtproxy -f${NC}           -- logi"
-    echo -e "  ${CYAN}systemctl restart mtproxy${NC}         -- perezapusk"
-    echo -e "  ${CYAN}curl http://127.0.0.1:8888/stats${NC}  -- statistika"
-    echo -e "  ${CYAN}cat ${INSTALL_DIR}/secret.txt${NC}     -- sekret"
+    echo -e "  ${CYAN}journalctl -u mtproxy -f${NC}           -- logs"
+    echo -e "  ${CYAN}systemctl restart mtproxy${NC}         -- restart"
+    echo -e "  ${CYAN}curl http://127.0.0.1:8888/stats${NC}  -- stats"
+    echo -e "  ${CYAN}cat ${INSTALL_DIR}/secret.txt${NC}     -- show secret"
     echo ""
-    echo -e "  ${YELLOW}Monetizatsiya: @MTProxyBot -> /newproxy -> dobavte -P <TAG>${NC}"
     echo ""
     echo -e "  ${DIM}------------------------------------------------------${NC}"
-    echo -e "  ${DIM}Avtor: ${NC}${BOLD}SXCVIO${NC}${DIM} | github.com/sxcvio/Auto-MTProto${NC}"
+    echo -e "  ${DIM}Author: ${NC}${BOLD}SXCVIO${NC}${DIM} | github.com/sxcvio/Auto-MTProto${NC}"
     echo -e "  ${DIM}------------------------------------------------------${NC}"
     echo ""
 }
